@@ -676,6 +676,25 @@ app.delete('/api/admin/queries/delete-old', authenticateJWT, async (req, res) =>
         res.status(500).json({ error: err.message });
     }
 });
+app.delete('/api/admin/queries/delete-old', authenticateJWT, async (req, res) => {
+    try {
+        const thirtyDaysAgo = new Date();
+        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+        
+        // FIX: Only delete queries that actually HAVE a created_at date
+        const { data, error } = await supabaseAdmin
+            .from('queries')
+            .delete()
+            .lt('created_at', thirtyDaysAgo.toISOString())
+            .not('created_at', 'is', null);  // <-- ADD THIS LINE
+            
+        if (error) return res.status(500).json({ error: error.message });
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Auto-delete error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
 
 // --- THEME SETTINGS ---
 app.get('/api/theme', async (req, res) => {
