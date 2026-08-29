@@ -657,27 +657,6 @@ app.delete('/api/admin/queries/:id', authenticateJWT, async (req, res) => {
 // --- AUTO DELETE OLD QUERIES (Protected) ---
 app.delete('/api/admin/queries/delete-old', authenticateJWT, async (req, res) => {
     try {
-        // Calculate date 30 days ago
-        const thirtyDaysAgo = new Date();
-        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-        
-        // Delete queries older than 30 days
-        const { data, error } = await supabaseAdmin
-            .from('queries')
-            .delete()
-            .lt('created_at', thirtyDaysAgo.toISOString());
-        
-        if (error) return res.status(500).json({ error: error.message });
-        
-        console.log('✅ Backend auto-deleted old queries');
-        res.json({ success: true, message: 'Old queries deleted successfully' });
-    } catch (err) {
-        console.error('Auto-delete error:', err);
-        res.status(500).json({ error: err.message });
-    }
-});
-app.delete('/api/admin/queries/delete-old', authenticateJWT, async (req, res) => {
-    try {
         const thirtyDaysAgo = new Date();
         thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
         
