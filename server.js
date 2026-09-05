@@ -8,7 +8,7 @@ const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5500';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://zolotie-griffony.netlify.app/';
 
 // ============ MIDDLEWARE ============
 app.use(cors({
@@ -44,16 +44,23 @@ const authenticateJWT = (req, res, next) => {
 // ============ FILE UPLOAD CONFIG ============
 const upload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+    limits: { fileSize: 200 * 1024 * 1024 }, // 200MB for videos!
     fileFilter: (req, file, cb) => {
-        const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-        if (allowedTypes.includes(file.mimetype)) {
+        const allowedImageTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+        const allowedVideoTypes = ['video/mp4', 'video/webm', 'video/ogg', 'video/quicktime'];
+        
+        if (allowedImageTypes.includes(file.mimetype) || allowedVideoTypes.includes(file.mimetype)) {
             cb(null, true);
         } else {
-            cb(new Error('Invalid file type. Only JPEG, PNG, WEBP, GIF allowed.'));
+            cb(new Error('Invalid file type'));
         }
     }
 });
+// Create a middleware for multiple images (using .array instead of .single)
+const uploadMultiple = upload.fields([
+    { name: 'image', maxCount: 1 },
+    { name: 'multiple_images', maxCount: 10 }
+]);
 
 // ============ UPLOAD IMAGE TO SUPABASE STORAGE ============
 async function uploadImageToStorage(file, folder = 'general') {
@@ -177,6 +184,23 @@ app.post('/api/admin/setup', async (req, res) => {
     res.json({ success: true, message: 'Admin created' });
 });
 
+// ========== ADD THIS NEW ROUTE HERE ==========
+// --- REFRESH TOKEN ---
+app.post('/api/admin/refresh-token', authenticateJWT, async (req, res) => {
+    try {
+        // Generate new token
+        const newToken = jwt.sign(
+            { id: req.user.id, username: req.user.username, role: req.user.role },
+            process.env.JWT_SECRET,
+            { expiresIn: '8h' }
+        );
+        
+        res.json({ token: newToken });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // --- GET NEWS (Public) ---
 app.get('/api/news', async (req, res) => {
     const { data, error } = await supabaseAdmin
@@ -204,32 +228,58 @@ app.get('/api/events', async (req, res) => {
     res.json(data || []);
 });
 
-// --- CREATE NEWS (Protected) ---
-app.post('/api/admin/news', authenticateJWT, upload.single('image'), async (req, res) => {
+// --- CREATE NEWS (Protected) - UPDATED ---
+app.post('/api/admin/news', authenticateJWT, uploadMultiple, async (req, res) => {
     try {
-        const { title, description, date, category, video, register_link, location, link } = req.body;
+        const { title, description, date, category, video, register_link, location, link, multiple_images, image } = req.body;
         
         if (!title || !description || !date) {
             return res.status(400).json({ error: 'Title, description and date required' });
         }
         
-        // Upload image if provided
+        console.log('📝 Creating news:', { title, category, date });
+        console.log('📎 Files received:', req.files ? Object.keys(req.files) : 'none');
+        console.log('📎 Body:', { multiple_images: multiple_images ? 'present' : 'none', image: image ? 'present' : 'none' });
+        
+        // Upload MAIN image if provided
         let imageUrl = null;
-        if (req.file) {
-            imageUrl = await uploadImageToStorage(req.file, 'news');
+        if (req.files && req.files.image && req.files.image.length > 0) {
+            imageUrl = await uploadImageToStorage(req.files.image[0], 'news');
+            console.log('✅ Main image uploaded:', imageUrl);
+        } else if (image && typeof image === 'string' && image.startsWith('http')) {
+            // Image is already a URL (existing image)
+            imageUrl = image;
+            console.log('✅ Using existing image URL:', imageUrl);
         }
         
-        // Parse multiple_images if provided
+        // Handle MULTIPLE images
         let multipleImages = [];
-        if (req.body.multiple_images) {
-            try {
-                multipleImages = JSON.parse(req.body.multiple_images);
-            } catch (e) {
-                // If not JSON, treat as single string
-                if (req.body.multiple_images) {
-                    multipleImages = [req.body.multiple_images];
-                }
+        
+        // Check if we have files uploaded
+        if (req.files && req.files.multiple_images && req.files.multiple_images.length > 0) {
+            for (const file of req.files.multiple_images) {
+                const url = await uploadImageToStorage(file, 'news_gallery');
+                if (url) multipleImages.push(url);
             }
+            console.log('✅ Uploaded multiple images from files:', multipleImages.length);
+        } 
+        // Check if multiple_images is sent as JSON string
+        else if (multiple_images) {
+            try {
+                const parsed = JSON.parse(multiple_images);
+                if (Array.isArray(parsed) && parsed.length > 0) {
+                    // Filter out any data URLs (these are already uploaded images)
+                    multipleImages = parsed.filter(url => url && !url.startsWith('data:'));
+                    console.log('✅ Multiple images from JSON (filtered):', multipleImages.length);
+                }
+            } catch (e) {
+                console.log('⚠️ Could not parse multiple_images as JSON:', e.message);
+            }
+        }
+        
+        // If no images, set to null
+        if (multipleImages.length === 0) {
+            multipleImages = null;
         }
         
         const { data, error } = await supabaseAdmin
@@ -243,50 +293,77 @@ app.post('/api/admin/news', authenticateJWT, upload.single('image'), async (req,
                 video: video || null,
                 register_link: register_link || null,
                 location: location || null,
-                multiple_images: multipleImages.length > 0 ? multipleImages : null,
+                multiple_images: multipleImages,
                 link: link || null,
                 created_at: new Date().toISOString()
             }])
             .select();
         
         if (error) {
+            console.error('❌ Supabase error:', error);
             return res.status(500).json({ error: error.message });
         }
         
+        console.log('✅ News created:', data[0].id);
         res.json({ success: true, data: data[0] });
     } catch (err) {
-        console.error('Create news error:', err);
+        console.error('❌ Create news error:', err);
         res.status(500).json({ error: err.message });
     }
 });
 
-// --- UPDATE NEWS (Protected) ---
-app.put('/api/admin/news/:id', authenticateJWT, upload.single('image'), async (req, res) => {
+// --- UPDATE NEWS (Protected) - UPDATED ---
+app.put('/api/admin/news/:id', authenticateJWT, uploadMultiple, async (req, res) => {
     try {
         const { id } = req.params;
-        const { title, description, date, category, video, register_link, location, link } = req.body;
+        const { title, description, date, category, video, register_link, location, link, multiple_images, image } = req.body;
         
-        // Get existing item to preserve image if no new one uploaded
-        const { data: existing } = await supabaseAdmin
+        console.log('📝 Updating news:', id);
+        
+        // Get existing item
+        const { data: existing, error: findError } = await supabaseAdmin
             .from('news_items')
             .select('image, multiple_images')
             .eq('id', id)
             .single();
         
-        let imageUrl = existing?.image || null;
-        if (req.file) {
-            imageUrl = await uploadImageToStorage(req.file, 'news');
+        if (findError) {
+            console.error('❌ Error finding news:', findError);
+            return res.status(404).json({ error: 'News not found' });
         }
         
-        let multipleImages = existing?.multiple_images || [];
-        if (req.body.multiple_images) {
-            try {
-                multipleImages = JSON.parse(req.body.multiple_images);
-            } catch (e) {
-                if (req.body.multiple_images) {
-                    multipleImages = [req.body.multiple_images];
-                }
+        // Handle main image
+        let imageUrl = existing?.image || null;
+        if (req.files && req.files.image && req.files.image.length > 0) {
+            imageUrl = await uploadImageToStorage(req.files.image[0], 'news');
+            console.log('✅ Main image updated');
+        } else if (image && typeof image === 'string' && image.startsWith('http')) {
+            imageUrl = image;
+        }
+        
+        // Handle multiple images
+        let multipleImages = [];
+        
+        if (req.files && req.files.multiple_images && req.files.multiple_images.length > 0) {
+            for (const file of req.files.multiple_images) {
+                const url = await uploadImageToStorage(file, 'news_gallery');
+                if (url) multipleImages.push(url);
             }
+            console.log('✅ Uploaded multiple images from files:', multipleImages.length);
+        } else if (multiple_images) {
+            try {
+                const parsed = JSON.parse(multiple_images);
+                if (Array.isArray(parsed) && parsed.length > 0) {
+                    multipleImages = parsed.filter(url => url && !url.startsWith('data:'));
+                    console.log('✅ Multiple images from JSON:', multipleImages.length);
+                }
+            } catch (e) {
+                console.log('⚠️ Could not parse multiple_images:', e.message);
+            }
+        }
+        
+        if (multipleImages.length === 0) {
+            multipleImages = null;
         }
         
         const { data, error } = await supabaseAdmin
@@ -300,19 +377,21 @@ app.put('/api/admin/news/:id', authenticateJWT, upload.single('image'), async (r
                 video: video || null,
                 register_link: register_link || null,
                 location: location || null,
-                multiple_images: multipleImages.length > 0 ? multipleImages : null,
+                multiple_images: multipleImages,
                 link: link || null
             })
             .eq('id', id)
             .select();
         
         if (error) {
+            console.error('❌ Supabase error:', error);
             return res.status(500).json({ error: error.message });
         }
         
+        console.log('✅ News updated:', id);
         res.json({ success: true, data: data[0] });
     } catch (err) {
-        console.error('Update news error:', err);
+        console.error('❌ Update news error:', err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -343,7 +422,8 @@ app.get('/api/branches', async (req, res) => {
     const { data, error } = await supabaseAdmin
         .from('branches')
         .select('*')
-        .order('created_at', { ascending: false });
+        .order('date', { ascending: false }); // Sorts by your actual date column
+    // OR if you are sure created_at exists: .order('created_at', { ascending: false });
     
     if (error) return res.status(500).json({ error: error.message });
     res.json(data || []);
@@ -630,8 +710,7 @@ app.put('/api/admin/queries/:id/reply', authenticateJWT, async (req, res) => {
             .from('queries')
             .update({
                 admin_reply: reply,
-                status: 'replied',
-                replied_at: new Date().toISOString()
+                status: 'replied'
             })
             .eq('id', id)
             .select();
@@ -644,6 +723,35 @@ app.put('/api/admin/queries/:id/reply', authenticateJWT, async (req, res) => {
     }
 });
 
+// --- DELETE OLD QUERIES (Protected) ---
+app.delete('/api/admin/queries/delete-old', async (req, res) => { // REMOVED authenticateJWT
+    try {
+        const thirtyDaysAgo = new Date();
+        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+        console.log("🚨 SERVER RECEIVED REQUEST, DELETING OLD QUERIES...");
+
+        const { data, error } = await supabaseAdmin
+            .from('queries')
+            .delete()
+            .not('created_at', 'is', null)
+            .lt('created_at', thirtyDaysAgo.toISOString());
+
+        if (error) {
+            console.log("Auto-delete error (ignored):", error.message);
+            return res.json({ success: true }); // Always send 200
+        }
+
+        console.log("✅ DELETED OLD QUERIES:", data?.length);
+        res.json({ success: true });
+    } catch (err) {
+        console.log("Auto-delete catch (ignored):", err.message);
+        res.json({ success: true }); // Always send 200
+    }
+});
+
+// --- DELETE SINGLE QUERY (Protected) ---
+// Note: This must come AFTER the delete-old route so Node.js doesn't confuse "delete-old" with an ID
 app.delete('/api/admin/queries/:id', authenticateJWT, async (req, res) => {
     try {
         const { id } = req.params;
@@ -651,26 +759,6 @@ app.delete('/api/admin/queries/:id', authenticateJWT, async (req, res) => {
         if (error) return res.status(500).json({ error: error.message });
         res.json({ success: true });
     } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-// --- AUTO DELETE OLD QUERIES (Protected) ---
-app.delete('/api/admin/queries/delete-old', authenticateJWT, async (req, res) => {
-    try {
-        const thirtyDaysAgo = new Date();
-        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-        
-        // FIX: Only delete queries that actually HAVE a created_at date
-        const { data, error } = await supabaseAdmin
-            .from('queries')
-            .delete()
-            .lt('created_at', thirtyDaysAgo.toISOString())
-            .not('created_at', 'is', null);  // <-- ADD THIS LINE
-            
-        if (error) return res.status(500).json({ error: error.message });
-        res.json({ success: true });
-    } catch (err) {
-        console.error('Auto-delete error:', err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -813,10 +901,15 @@ app.get('/api/admin/settings', authenticateJWT, async (req, res) => {
     res.json(data);
 });
 
+// --- UPDATE PASSWORD (Protected) - REPLACES OLD PASSWORD HASH ---
 app.put('/api/admin/settings/password', authenticateJWT, async (req, res) => {
     try {
         const { currentPassword, newPassword } = req.body;
         
+        if (!currentPassword || !newPassword) {
+            return res.status(400).json({ error: 'Both current and new passwords required' });
+        }
+
         // Get current user
         const { data: user } = await supabaseAdmin
             .from('admin_users')
@@ -829,7 +922,7 @@ app.put('/api/admin/settings/password', authenticateJWT, async (req, res) => {
         // Verify current password
         const passwordMatch = await bcrypt.compare(currentPassword, user.password_hash);
         if (!passwordMatch) {
-            return res.status(401).json({ error: 'Current password is incorrect' });
+            return res.status(401).json({ error: 'Текущий пароль неверен' });
         }
         
         // Hash new password
@@ -837,7 +930,7 @@ app.put('/api/admin/settings/password', authenticateJWT, async (req, res) => {
         
         const { error } = await supabaseAdmin
             .from('admin_users')
-            .update({ password_hash: newHash })
+            .update({ password_hash: newHash }) // Updates ONLY the hash column
             .eq('id', req.user.id);
         
         if (error) return res.status(500).json({ error: error.message });
@@ -846,6 +939,237 @@ app.put('/api/admin/settings/password', authenticateJWT, async (req, res) => {
         console.error('Update password error:', err);
         res.status(500).json({ error: err.message });
     }
+});
+
+// --- UPDATE USERNAME (Protected) ---
+app.put('/api/admin/settings/username', authenticateJWT, async (req, res) => {
+    try {
+        const { newUsername } = req.body;
+        
+        if (!newUsername) return res.status(400).json({ error: 'New username required' });
+
+        const { data: existing } = await supabaseAdmin
+            .from('admin_users')
+            .select('id')
+            .eq('username', newUsername)
+            .maybeSingle();
+
+        if (existing) return res.status(400).json({ error: 'Этот логин уже занят' });
+
+        const { error } = await supabaseAdmin
+            .from('admin_users')
+            .update({ username: newUsername })
+            .eq('id', req.user.id);
+        
+        if (error) return res.status(500).json({ error: error.message });
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// --- RESET PASSWORD BY EMAIL (No Auth) ---
+app.post('/api/admin/setup-reset-by-email', async (req, res) => {
+    try {
+        const { email, newPassword, newUsername } = req.body;
+
+        if (!email || !newPassword) {
+            return res.status(400).json({ error: 'Email and new password required' });
+        }
+
+        console.log('🔄 Reset by email');
+
+        // Find user by EMAIL
+        const { data: user, error: findError } = await supabaseAdmin
+            .from('admin_users')
+            .select('id, username, email')
+            .eq('email', email)
+            .single();
+
+        if (findError || !user) {
+            console.error('❌ User not found by email');
+            return res.status(404).json({ error: 'Пользователь с таким email не найден' });
+        }
+
+        console.log('✅ User found:', user.username);
+
+        // Hash new password
+        const newHash = await bcrypt.hash(newPassword, 10);
+
+        // Update password (and optionally username)
+        const updateData = { password_hash: newHash };
+        
+        if (newUsername && newUsername.trim() !== '') {
+            // Check if username is taken
+            const { data: existing } = await supabaseAdmin
+                .from('admin_users')
+                .select('id')
+                .eq('username', newUsername)
+                .maybeSingle();
+            
+            if (existing && existing.id !== user.id) {
+                return res.status(400).json({ error: 'Этот логин уже занят' });
+            }
+            updateData.username = newUsername;
+        }
+
+        // Update user
+        const { error: updateError } = await supabaseAdmin
+            .from('admin_users')
+            .update(updateData)
+            .eq('id', user.id);
+
+        if (updateError) {
+            console.error('❌ Update error:', updateError);
+            return res.status(500).json({ error: updateError.message });
+        }
+
+        const finalUsername = updateData.username || user.username;
+        console.log('✅ Reset successful for:', finalUsername);
+        
+        res.json({ 
+            success: true,
+            username: finalUsername
+        });
+        
+    } catch (err) {
+        console.error('❌ Reset error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// --- SITE STATS (Public) ---
+app.get('/api/stats', async (req, res) => {
+    const { data, error } = await supabaseAdmin
+        .from('site_stats')
+        .select('*')
+        .eq('id', 1)
+        .single();
+    
+    if (error) return res.status(500).json({ error: error.message });
+    
+    // Return the defaults if no row exists
+    res.json(data || { active_volunteers: 150, completed_projects: 50, help_provided: 5000 });
+});
+
+// --- UPDATE SITE STATS (Protected) ---
+app.put('/api/admin/stats', authenticateJWT, async (req, res) => {
+    try {
+        const { active_volunteers, completed_projects, help_provided } = req.body;
+
+        const { data, error } = await supabaseAdmin
+            .from('site_stats')
+            .update({
+                active_volunteers: parseInt(active_volunteers),
+                completed_projects: parseInt(completed_projects),
+                help_provided: parseInt(help_provided),
+                updated_at: new Date().toISOString()
+            })
+            .eq('id', 1)
+            .select();
+
+        if (error) return res.status(500).json({ error: error.message });
+        res.json({ success: true, data: data[0] });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// --- ARCHIVE QUERY (Protected) ---
+app.put('/api/admin/queries/:id/archive', authenticateJWT, async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        // Get current status before archiving
+        const { data: existing, error: findError } = await supabaseAdmin
+            .from('queries')
+            .select('status')
+            .eq('id', id)
+            .single();
+        
+        if (findError) {
+            return res.status(500).json({ error: findError.message });
+        }
+        
+        console.log('📦 Archiving query:', id, 'Previous status:', existing.status);
+        
+        const { data, error } = await supabaseAdmin
+            .from('queries')
+            .update({ 
+                status: 'archived'
+            })
+            .eq('id', id)
+            .select();
+        
+        if (error) {
+            console.error('Archive query error:', error);
+            return res.status(500).json({ error: error.message });
+        }
+        res.json({ success: true, data: data[0] });
+    } catch (err) {
+        console.error('Archive query error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// --- UNARCHIVE QUERY (Protected) ---
+app.put('/api/admin/queries/:id/unarchive', authenticateJWT, async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        // FIRST: Get the current query to check if it has a reply
+        const { data: existing, error: findError } = await supabaseAdmin
+            .from('queries')
+            .select('admin_reply')
+            .eq('id', id)
+            .single();
+        
+        if (findError) {
+            return res.status(500).json({ error: findError.message });
+        }
+        
+        // Determine the correct status
+        // If it has a reply, set to 'replied', otherwise 'pending'
+        const newStatus = (existing.admin_reply && existing.admin_reply.trim() !== '') 
+            ? 'replied' 
+            : 'pending';
+        
+        console.log('📤 Unarchiving query:', id, 'Status will be:', newStatus);
+        
+        const { data, error } = await supabaseAdmin
+            .from('queries')
+            .update({ 
+                status: newStatus  // ← Set correct status based on whether it has a reply
+            })
+            .eq('id', id)
+            .select();
+        
+        if (error) {
+            console.error('Unarchive query error:', error);
+            return res.status(500).json({ error: error.message });
+        }
+        res.json({ success: true, data: data[0] });
+    } catch (err) {
+        console.error('Unarchive query error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+// ============ GLOBAL ERROR HANDLER ============
+app.use((err, req, res, next) => {
+    console.error('Server error:', err.message);
+    
+    // Multer file size error
+    if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ error: 'File is too large. Max size is 200MB.' });
+    }
+    
+    // Multer file type error
+    if (err.message === 'Invalid file type') {
+        return res.status(400).json({ error: 'Invalid file type. Only images and videos allowed.' });
+    }
+    
+    // Any other error
+    res.status(500).json({ error: err.message || 'Internal Server Error' });
 });
 
 // ============ START SERVER ============
