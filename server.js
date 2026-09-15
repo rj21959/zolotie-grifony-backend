@@ -8,7 +8,7 @@ const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://zolotie-griffony.netlify.app/';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://zolotiegrifony.ru/api';
 
 // ============ MIDDLEWARE ============
 app.use(cors({
@@ -1173,7 +1173,7 @@ app.use((err, req, res, next) => {
 });
 
 // ============ START SERVER ============
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Backend server running on port ${PORT}`);
     console.log(`📡 Frontend URL: ${FRONTEND_URL}`);
 });
