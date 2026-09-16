@@ -8,11 +8,30 @@ const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://zolotiegrifony.ru/api';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://zolotiegrifony.ru';
+
+// ============ CORS CONFIGURATION ============
+// Allow multiple origins (frontend URLs)
+const ALLOWED_ORIGINS = [
+    'https://zolotiegrifony.ru',
+    'https://www.zolotiegrifony.ru',
+    'https://rj21959-zolotie-grifony-frontend-19cd.twc1.net',
+    'https://zolotie-griffony.netlify.app'
+];
 
 // ============ MIDDLEWARE ============
 app.use(cors({
-    origin: FRONTEND_URL,
+    origin: function(origin, callback) {
+        // Allow requests with no origin (mobile apps, curl, etc.)
+        if (!origin) return callback(null, true);
+        
+        if (ALLOWED_ORIGINS.indexOf(origin) !== -1) {
+            callback(null, true);
+        } else {
+            console.log('⚠️ CORS blocked origin:', origin);
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
     credentials: true
 }));
 app.use(express.json({ limit: '50mb' }));
